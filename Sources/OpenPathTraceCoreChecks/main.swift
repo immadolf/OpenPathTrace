@@ -52,4 +52,34 @@ check(
     "左右都不足时应覆盖在弹窗右上角"
 )
 
+check(
+    !DialogHeuristic.acceptsWindow(
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        title: "Downloads",
+        hasControlTitleMatch: true
+    ),
+    "普通 Finder 窗口即使包含 Open 控件也不应被识别为文件弹窗"
+)
+
+check(
+    DialogHeuristic.acceptsWindow(
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        title: "Open",
+        hasControlTitleMatch: false
+    ),
+    "标题为 Open 的标准窗口应被识别为文件弹窗"
+)
+
+check(
+    DialogHeuristic.acceptsWindow(
+        role: "AXSheet",
+        subrole: "",
+        title: "",
+        hasControlTitleMatch: true
+    ),
+    "Sheet 可用控件文案作为文件弹窗兜底识别"
+)
+
 print("OpenPathTraceCoreChecks passed")

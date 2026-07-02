@@ -45,6 +45,19 @@ public enum OverlayPlacement {
     }
 }
 
+public enum DialogHeuristic {
+    private static let titleNeedles = ["open", "save", "export", "upload", "choose", "打开", "存储", "保存", "另存为", "导出", "上传", "选取", "选择"]
+
+    public static func acceptsWindow(role: String, subrole: String, title: String, hasControlTitleMatch: Bool) -> Bool {
+        let isSheetOrDialog = role == "AXSheet" || subrole == "AXDialog"
+        let isWindow = role == "AXWindow"
+        guard isSheetOrDialog || isWindow else { return false }
+
+        let titleMatches = titleNeedles.contains { title.lowercased().contains($0) }
+        return titleMatches || (isSheetOrDialog && hasControlTitleMatch)
+    }
+}
+
 public final class PathStore {
     private let fileURL: URL
     private let encoder = JSONEncoder()

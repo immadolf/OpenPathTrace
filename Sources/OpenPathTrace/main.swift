@@ -326,16 +326,9 @@ final class FileDialogDetector {
     private func detect(_ element: AXUIElement, pid: pid_t, reason: String) -> DetectedDialog? {
         let role = stringAttribute(element, kAXRoleAttribute) ?? ""
         let subrole = stringAttribute(element, kAXSubroleAttribute) ?? ""
-        guard role == kAXWindowRole as String || role == "AXSheet" || subrole == kAXDialogSubrole as String else {
-            return nil
-        }
-
         let title = stringAttribute(element, kAXTitleAttribute) ?? ""
-        let lower = title.lowercased()
-        let titleMatches = ["open", "save", "export", "upload", "choose", "打开", "存储", "保存", "另存为", "导出", "上传", "选取", "选择"]
-            .contains { lower.contains($0) }
         let controlMatches = containsAnyControlTitle(in: element, depth: 0)
-        guard titleMatches || controlMatches else { return nil }
+        guard DialogHeuristic.acceptsWindow(role: role, subrole: subrole, title: title, hasControlTitleMatch: controlMatches) else { return nil }
 
         guard let frame = frame(of: element), frame.width > 300, frame.height > 180 else { return nil }
         return DetectedDialog(pid: pid, element: element, frame: frame, title: title.isEmpty ? role : title, reason: reason)
