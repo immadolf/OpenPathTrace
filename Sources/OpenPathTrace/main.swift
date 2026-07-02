@@ -25,8 +25,9 @@ struct PathEntry {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
+    private var accessibilityItem: NSMenuItem!
     private var launchAtLoginItem: NSMenuItem!
     private let pathStore = PathStore()
     private let overlay = OverlayPanelController()
@@ -36,6 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: AccessibilityMonitor!
     private var config = AppConfig()
     private var currentDialog: DetectedDialog?
+    private var cachedFinderPaths: [String] = []
+    private var finderRefreshInFlight = false
+    private var jumpInFlight = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setbuf(stdout, nil)
@@ -62,17 +66,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(NSMenuItem(title: "打开配置文件", action: #selector(openConfigFile), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "打开辅助功能设置", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
+        accessibilityItem = NSMenuItem(title: "辅助功能权限：检查中", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        menu.addItem(accessibilityItem)
         launchAtLoginItem = NSMenuItem(title: "登录时启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        checkAccessibilityPermission(prompt: false)
         refreshLaunchAtLoginState()
         return menu
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        checkAccessibilityPermission(prompt: false)
+        refreshLaunchAtLoginState()
+    }
+
     private func handle(dialog: DetectedDialog?) {
+        guard OverlayUpdatePolicy.shouldRenderOverlay(hasDialog: dialog != nil, isJumping: jumpInFlight) else {
+            if dialog == nil {
+                currentDialog = nil
+                overlay.hide()
+            }
+            return
+        }
+
         guard let dialog else {
             currentDialog = nil
             overlay.hide()
@@ -86,18 +106,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onSelect: { [weak self] path in self?.jump(to: path) },
             onToggleFavorite: { [weak self] path in self?.toggleFavorite(path) }
         )
+        refreshFinderPaths()
     }
 
     private func pathEntries() -> [PathEntry] {
         var entries: [PathEntry] = []
         let favorites = existing(config.favorites)
         let recent = existing(config.recent).filter { !favorites.contains($0) }
-        let finderPaths = existing(finder.openWindowPaths()).filter { !favorites.contains($0) && !recent.contains($0) }
+        let finderPaths = existing(cachedFinderPaths).filter { !favorites.contains($0) && !recent.contains($0) }
 
         entries += favorites.map { entry(group: "收藏", path: $0, favorite: true) }
         entries += recent.map { entry(group: "最近", path: $0, favorite: config.favorites.contains($0)) }
         entries += finderPaths.map { entry(group: "Finder", path: $0, favorite: config.favorites.contains($0)) }
         return entries
+    }
+
+    private func refreshFinderPaths() {
+        guard !finderRefreshInFlight else { return }
+        finderRefreshInFlight = true
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let paths = FinderPathProvider().openWindowPaths()
+            Task { @MainActor in
+                self.finderRefreshInFlight = false
+                logger.info("Finder 路径刷新 count=\(paths.count) names=\(paths.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ","), privacy: .public)")
+                guard self.cachedFinderPaths != paths else { return }
+                self.cachedFinderPaths = paths
+                if let currentDialog = self.currentDialog {
+                    self.handle(dialog: currentDialog)
+                }
+            }
+        }
     }
 
     private func entry(group: String, path: String, favorite: Bool) -> PathEntry {
@@ -125,11 +165,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func jump(to path: String) {
         guard let dialog = currentDialog else { return }
-        navigator.jump(to: path, in: dialog)
+        guard !jumpInFlight else { return }
+        jumpInFlight = true
+        overlay.hide()
+        monitor.pauseScanning(for: 1.0)
+        navigator.jump(to: path, in: dialog) { [weak self] in
+            self?.finishJump()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.finishJump()
+        }
         config.recordRecent(path)
         saveConfig()
         logger.info("已发送跳转路径 path=\(URL(fileURLWithPath: path).lastPathComponent, privacy: .public)")
-        handle(dialog: dialog)
+    }
+
+    private func finishJump() {
+        guard jumpInFlight else { return }
+        jumpInFlight = false
+        if OverlayUpdatePolicy.shouldRenderAfterJump(hasDialog: currentDialog != nil),
+           let currentDialog {
+            handle(dialog: currentDialog)
+        }
     }
 
     private func toggleFavorite(_ path: String) {
@@ -153,7 +210,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = "AXTrustedCheckOptionPrompt"
         let trusted = AXIsProcessTrustedWithOptions([key: prompt] as CFDictionary)
         statusItem.button?.title = trusted ? "OPT" : "OPT!"
-        logger.info("辅助功能权限 trusted=\(trusted)")
+        accessibilityItem?.title = trusted ? "辅助功能已授权" : "辅助功能未授权 - 点击打开设置"
+        accessibilityItem?.state = trusted ? .on : .off
+        accessibilityItem?.toolTip = trusted ? "OpenPathTrace 可以监听标准文件弹窗" : "打开系统设置 > 隐私与安全性 > 辅助功能"
+        if trusted {
+            logger.info("辅助功能权限已授权")
+        } else {
+            logger.error("辅助功能未授权，文件弹窗监听不会生效")
+        }
         return trusted
     }
 
@@ -195,6 +259,7 @@ final class AccessibilityMonitor {
     private var source: CFRunLoopSource?
     private var timer: Timer?
     private var lastSignature = ""
+    private var scanPausedUntil = Date.distantPast
 
     init(onChange: @escaping (DetectedDialog?) -> Void) {
         self.onChange = onChange
@@ -209,12 +274,16 @@ final class AccessibilityMonitor {
         )
         attach(to: NSWorkspace.shared.frontmostApplication)
         timer = Timer.scheduledTimer(
-            timeInterval: 0.25,
+            timeInterval: 0.05,
             target: self,
             selector: #selector(timerTick),
             userInfo: nil,
             repeats: true
         )
+    }
+
+    func pauseScanning(for seconds: TimeInterval) {
+        scanPausedUntil = Date().addingTimeInterval(seconds)
     }
 
     @objc private func timerTick() {
@@ -274,12 +343,13 @@ final class AccessibilityMonitor {
     }
 
     private func scan(reason: String, deep: Bool) {
+        guard Date() >= scanPausedUntil else { return }
         guard let currentApp else { return }
         let start = CFAbsoluteTimeGetCurrent()
         let dialog = detector.findDialog(in: currentApp, pid: currentPID, reason: reason, deep: deep)
         let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1_000)
         let signature = dialog.map { "\($0.pid)|\(Int($0.frame.origin.x))|\(Int($0.frame.origin.y))|\($0.title)" } ?? "none"
-        guard signature != lastSignature || reason != "poll" else { return }
+        guard signature != lastSignature else { return }
         lastSignature = signature
 
         if let dialog {
@@ -327,7 +397,8 @@ final class FileDialogDetector {
         let role = stringAttribute(element, kAXRoleAttribute) ?? ""
         let subrole = stringAttribute(element, kAXSubroleAttribute) ?? ""
         let title = stringAttribute(element, kAXTitleAttribute) ?? ""
-        let controlMatches = containsAnyControlTitle(in: element, depth: 0)
+        let controlMatches = DialogHeuristic.shouldScanControlTitles(role: role, subrole: subrole, title: title)
+            && containsAnyControlTitle(in: element, depth: 0)
         guard DialogHeuristic.acceptsWindow(role: role, subrole: subrole, title: title, hasControlTitleMatch: controlMatches) else { return nil }
 
         guard let frame = frame(of: element), frame.width > 300, frame.height > 180 else { return nil }
@@ -345,10 +416,49 @@ final class FileDialogDetector {
 }
 
 @MainActor
+final class SkeuoPanelView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSGradient(colors: [
+            NSColor(calibratedWhite: 0.90, alpha: 1),
+            NSColor(calibratedWhite: 0.82, alpha: 1),
+            NSColor(calibratedWhite: 0.76, alpha: 1)
+        ])?.draw(in: bounds, angle: -90)
+    }
+}
+
+@MainActor
+final class SkeuoInsetView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
+        NSGradient(colors: [
+            NSColor(calibratedWhite: 0.70, alpha: 1),
+            NSColor(calibratedWhite: 0.82, alpha: 1),
+            NSColor(calibratedWhite: 0.92, alpha: 1)
+        ])?.draw(in: path, angle: -90)
+        NSColor(calibratedWhite: 0.50, alpha: 0.45).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let inner = bounds.insetBy(dx: 4, dy: 4)
+        let innerPath = NSBezierPath(roundedRect: inner, xRadius: 7, yRadius: 7)
+        NSGradient(colors: [
+            NSColor(calibratedWhite: 0.93, alpha: 1),
+            NSColor(calibratedWhite: 0.98, alpha: 1),
+            NSColor(calibratedWhite: 0.94, alpha: 1)
+        ])?.draw(in: innerPath, angle: -90)
+    }
+}
+
+@MainActor
 final class OverlayPanelController: NSObject, NSSearchFieldDelegate {
     private let panel = NSPanel(
         contentRect: NSRect(x: 0, y: 0, width: 300, height: 360),
-        styleMask: [.titled, .utilityWindow],
+        styleMask: [.titled, .utilityWindow, .nonactivatingPanel],
         backing: .buffered,
         defer: false
     )
@@ -402,21 +512,52 @@ final class OverlayPanelController: NSObject, NSSearchFieldDelegate {
     private func buildShell() {
         let root = NSStackView()
         root.orientation = .vertical
-        root.spacing = 8
+        root.spacing = 10
         root.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
 
         searchField.placeholderString = "搜索路径"
         searchField.delegate = self
-        root.addArrangedSubview(searchField)
+        searchField.font = .systemFont(ofSize: 14)
+        let searchWell = SkeuoInsetView()
+        searchWell.translatesAutoresizingMaskIntoConstraints = false
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchWell.addSubview(searchField)
+        root.addArrangedSubview(searchWell)
+        NSLayoutConstraint.activate([
+            searchWell.heightAnchor.constraint(equalToConstant: 38),
+            searchWell.widthAnchor.constraint(equalToConstant: 276),
+            searchField.leadingAnchor.constraint(equalTo: searchWell.leadingAnchor, constant: 7),
+            searchField.trailingAnchor.constraint(equalTo: searchWell.trailingAnchor, constant: -7),
+            searchField.centerYAnchor.constraint(equalTo: searchWell.centerYAnchor)
+        ])
 
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 6
+        contentStack.spacing = 7
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        contentStack.widthAnchor.constraint(equalToConstant: 270).isActive = true
-        root.addArrangedSubview(contentStack)
+        let contentWell = SkeuoInsetView()
+        contentWell.translatesAutoresizingMaskIntoConstraints = false
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = contentStack
+        contentWell.addSubview(scrollView)
+        root.addArrangedSubview(contentWell)
+        NSLayoutConstraint.activate([
+            contentWell.widthAnchor.constraint(equalToConstant: 276),
+            contentWell.heightAnchor.constraint(equalToConstant: 260),
+            scrollView.leadingAnchor.constraint(equalTo: contentWell.leadingAnchor, constant: 10),
+            scrollView.trailingAnchor.constraint(equalTo: contentWell.trailingAnchor, constant: -10),
+            scrollView.topAnchor.constraint(equalTo: contentWell.topAnchor, constant: 11),
+            scrollView.bottomAnchor.constraint(equalTo: contentWell.bottomAnchor, constant: -11),
+            contentStack.widthAnchor.constraint(equalToConstant: 248)
+        ])
 
-        let view = NSView(frame: panel.frame)
+        let view = SkeuoPanelView(frame: panel.frame)
         root.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(root)
         NSLayoutConstraint.activate([
@@ -452,7 +593,13 @@ final class OverlayPanelController: NSObject, NSSearchFieldDelegate {
                 currentGroup = entry.group
                 let label = NSTextField(labelWithString: entry.group)
                 label.font = .boldSystemFont(ofSize: 12)
-                label.textColor = .secondaryLabelColor
+                label.textColor = NSColor(calibratedWhite: 0.32, alpha: 1)
+                label.shadow = {
+                    let shadow = NSShadow()
+                    shadow.shadowColor = NSColor.white.withAlphaComponent(0.85)
+                    shadow.shadowOffset = NSSize(width: 0, height: -1)
+                    return shadow
+                }()
                 contentStack.addArrangedSubview(label)
             }
 
@@ -460,7 +607,8 @@ final class OverlayPanelController: NSObject, NSSearchFieldDelegate {
             button.target = self
             button.action = #selector(pathClicked(_:))
             button.onToggleFavorite = { [weak self] path in self?.onToggleFavorite?(path) }
-            button.widthAnchor.constraint(equalToConstant: 260).isActive = true
+            button.widthAnchor.constraint(equalToConstant: 248).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 28).isActive = true
             contentStack.addArrangedSubview(button)
         }
     }
@@ -478,8 +626,8 @@ final class PathButton: NSButton {
     init(entry: PathEntry) {
         self.entry = entry
         super.init(frame: .zero)
-        title = "\(entry.favorite ? "★ " : "")\(entry.title)"
-        bezelStyle = .rounded
+        title = ""
+        isBordered = false
         alignment = .left
         toolTip = entry.path
     }
@@ -499,24 +647,55 @@ final class PathButton: NSButton {
     @objc private func toggleFavorite() {
         onToggleFavorite?(entry.path)
     }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        let colors = isHighlighted
+            ? [NSColor(calibratedWhite: 0.82, alpha: 1), NSColor(calibratedWhite: 0.94, alpha: 1)]
+            : [NSColor.white, NSColor(calibratedWhite: 0.88, alpha: 1)]
+        NSGradient(colors: colors)?.draw(in: path, angle: -90)
+        NSColor(calibratedWhite: 0.54, alpha: 0.75).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let cap = NSBezierPath(roundedRect: rect.insetBy(dx: 2, dy: 2), xRadius: 5, yRadius: 5)
+        NSColor.white.withAlphaComponent(isHighlighted ? 0.12 : 0.36).setFill()
+        cap.fill()
+
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.white.withAlphaComponent(0.85)
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        let text = "\(entry.favorite ? "★ " : "")\(entry.title)"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor(calibratedWhite: 0.16, alpha: 1),
+            .shadow: shadow
+        ]
+        (text as NSString).draw(in: rect.insetBy(dx: 11, dy: 5), withAttributes: attributes)
+    }
 }
 
 @MainActor
 final class DialogNavigator {
     private let source = CGEventSource(stateID: .hidSystemState)
 
-    func jump(to path: String, in dialog: DetectedDialog) {
+    func jump(to path: String, in dialog: DetectedDialog, completion: @escaping () -> Void) {
         logger.info("开始跳转 path=\(URL(fileURLWithPath: path).lastPathComponent, privacy: .public)")
         NSRunningApplication(processIdentifier: dialog.pid)?.activate(options: [])
         AXUIElementPerformAction(dialog.element, kAXRaiseAction as CFString)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
             self.postKey(5, flags: [.maskCommand, .maskShift])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                self.type(path)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                if !self.setFocusedTextValue(path) {
+                    logger.error("AX 焦点输入框写入失败，回退逐字符输入")
+                    self.type(path)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
                     self.postKey(36)
                     logger.info("跳转按键序列已发送")
+                    completion()
                 }
             }
         }
@@ -530,6 +709,19 @@ final class DialogNavigator {
         let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
         up?.flags = flags
         up?.post(tap: .cghidEventTap)
+    }
+
+    private func setFocusedTextValue(_ value: String) -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        guard let focused = elementAttribute(systemWide, kAXFocusedUIElementAttribute) else { return false }
+        let role = stringAttribute(focused, kAXRoleAttribute) ?? ""
+        guard role == "AXTextField" || role == "AXComboBox" else {
+            logger.error("AX 当前焦点不是输入框 role=\(role, privacy: .public)")
+            return false
+        }
+        let result = AXUIElementSetAttributeValue(focused, kAXValueAttribute as CFString, value as CFString)
+        logger.info("AX 焦点输入框写入 result=\(result.rawValue)")
+        return result == .success
     }
 
     private func type(_ text: String) {
@@ -552,9 +744,9 @@ final class FinderPathProvider {
         let source = """
         tell application "Finder"
             set output to ""
-            repeat with w in windows
+            repeat with i from 1 to count of windows
                 try
-                    set output to output & POSIX path of (target of w as alias) & linefeed
+                    set output to output & POSIX path of ((target of window i) as alias) & linefeed
                 end try
             end repeat
             return output

@@ -48,13 +48,33 @@ public enum OverlayPlacement {
 public enum DialogHeuristic {
     private static let titleNeedles = ["open", "save", "export", "upload", "choose", "打开", "存储", "保存", "另存为", "导出", "上传", "选取", "选择"]
 
+    public static func titleMatches(_ title: String) -> Bool {
+        let normalized = title
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        return titleNeedles.contains(normalized)
+    }
+
+    public static func shouldScanControlTitles(role: String, subrole: String, title: String) -> Bool {
+        (role == "AXSheet" || subrole == "AXDialog") && !titleMatches(title)
+    }
+
     public static func acceptsWindow(role: String, subrole: String, title: String, hasControlTitleMatch: Bool) -> Bool {
         let isSheetOrDialog = role == "AXSheet" || subrole == "AXDialog"
         let isWindow = role == "AXWindow"
         guard isSheetOrDialog || isWindow else { return false }
 
-        let titleMatches = titleNeedles.contains { title.lowercased().contains($0) }
-        return titleMatches || (isSheetOrDialog && hasControlTitleMatch)
+        return titleMatches(title) || (isSheetOrDialog && hasControlTitleMatch)
+    }
+}
+
+public enum OverlayUpdatePolicy {
+    public static func shouldRenderOverlay(hasDialog: Bool, isJumping: Bool) -> Bool {
+        hasDialog && !isJumping
+    }
+
+    public static func shouldRenderAfterJump(hasDialog: Bool) -> Bool {
+        hasDialog
     }
 }
 

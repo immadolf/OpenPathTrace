@@ -42,6 +42,39 @@ open .build/OpenPathTrace.app
 swift run OpenPathTrace
 ```
 
+## 安装到 Applications
+
+辅助功能权限绑定 app 的 Bundle ID、安装路径和签名要求。开发时反复复制未签名或 ad-hoc 签名的 app，会导致 TCC 记录失效，表现为标准文件弹窗出现时不显示面板。
+
+首次安装前先检查本机是否有可用签名身份：
+
+```bash
+security find-identity -p codesigning -v
+```
+
+如果没有 `Apple Development`、`Developer ID Application`、`Mac Developer` 或 `OpenPathTrace Local Code Signing`，先创建本机自签名 code signing 证书：
+
+```bash
+make create-signing-identity
+```
+
+然后安装稳定签名版本：
+
+```bash
+make install
+```
+
+`make install` 会执行 release 构建、组装 `.app`、使用固定签名身份签名、停止旧进程、复制到 `/Applications/OpenPathTrace.app` 并启动。
+
+如果这是从 ad-hoc 签名切换过来的首次修复，需要手动重置一次辅助功能授权：
+
+1. 打开“系统设置 > 隐私与安全性 > 辅助功能”。
+2. 删除旧的 OpenPathTrace 记录。
+3. 添加 `/Applications/OpenPathTrace.app`。
+4. 开启授权。
+
+之后只要继续使用同一个签名身份和 `/Applications/OpenPathTrace.app`，TCC 授权不应因为每次构建反复失效。
+
 ## 验证
 
 ```bash
@@ -49,6 +82,16 @@ swift build
 swift run OpenPathTraceCoreChecks
 make app
 plutil -lint Resources/Info.plist
+make verify-installed
+```
+
+也可以拆开执行这些系统核验命令：
+
+```bash
+codesign -dv --verbose=4 /Applications/OpenPathTrace.app
+sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+  "SELECT service, client, auth_value, auth_reason, auth_version, last_modified FROM access WHERE service = 'kTCCServiceAccessibility' AND (client = 'dev.repairman.OpenPathTrace' OR client LIKE '%OpenPathTrace%');"
+/usr/bin/log show --last 10m --predicate 'process == "OpenPathTrace" OR process == "tccd"'
 ```
 
 `OpenPathTraceCoreChecks` 覆盖当前可纯函数验证的行为：最近路径去重/上限，以及贴边面板的位置策略。AX 监听和 `Cmd+Shift+G` 跳转属于 macOS 系统集成，需要手动打开标准文件弹窗验证。

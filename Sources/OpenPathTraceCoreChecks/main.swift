@@ -63,6 +63,16 @@ check(
 )
 
 check(
+    !DialogHeuristic.acceptsWindow(
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        title: "OpenPathTraceCore",
+        hasControlTitleMatch: false
+    ),
+    "标题包含 Open 的普通 Finder 窗口不应被识别为文件弹窗"
+)
+
+check(
     DialogHeuristic.acceptsWindow(
         role: "AXWindow",
         subrole: "AXStandardWindow",
@@ -73,6 +83,24 @@ check(
 )
 
 check(
+    !DialogHeuristic.shouldScanControlTitles(
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        title: "Open"
+    ),
+    "标题已命中的标准窗口不应递归扫描控件标题"
+)
+
+check(
+    !DialogHeuristic.shouldScanControlTitles(
+        role: "AXWindow",
+        subrole: "AXStandardWindow",
+        title: "Downloads"
+    ),
+    "普通标准窗口不应递归扫描控件标题"
+)
+
+check(
     DialogHeuristic.acceptsWindow(
         role: "AXSheet",
         subrole: "",
@@ -80,6 +108,25 @@ check(
         hasControlTitleMatch: true
     ),
     "Sheet 可用控件文案作为文件弹窗兜底识别"
+)
+
+check(
+    DialogHeuristic.shouldScanControlTitles(
+        role: "AXSheet",
+        subrole: "",
+        title: ""
+    ),
+    "无标题 Sheet 才需要递归扫描控件标题兜底"
+)
+
+check(
+    !OverlayUpdatePolicy.shouldRenderOverlay(hasDialog: true, isJumping: true),
+    "跳转进行中不应重绘辅助面板"
+)
+
+check(
+    OverlayUpdatePolicy.shouldRenderAfterJump(hasDialog: true),
+    "跳转结束且文件弹窗仍存在时应恢复辅助面板"
 )
 
 print("OpenPathTraceCoreChecks passed")
