@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenPathTrace 最小 PRD 与实现计划</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --fg: #202124;
+      --muted: #666b73;
+      --line: #dadbd6;
+      --panel: #ffffff;
+      --accent: #2368d9;
+      --accent-soft: #e8f0ff;
+      --danger: #a8442d;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111315;
+        --fg: #eff1f3;
+        --muted: #a5abb3;
+        --line: #34383d;
+        --panel: #191c20;
+        --accent: #74a8ff;
+        --accent-soft: #182945;
+        --danger: #ff9a80;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .page {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 48px 28px 72px;
+    }
+    .hero {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 28px;
+      margin-bottom: 30px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 34px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 34px 0 12px;
+      font-size: 21px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 22px 0 8px;
+      font-size: 16px;
+      line-height: 1.4;
+      letter-spacing: 0;
+    }
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 0 0 16px 22px; padding: 0; }
+    li { margin: 5px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      padding: 1px 5px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: rgba(127, 127, 127, 0.08);
+    }
+    .lead {
+      color: var(--muted);
+      max-width: 760px;
+      font-size: 17px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0;
+    }
+    .box {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px 18px;
+    }
+    .tag {
+      display: inline-block;
+      margin: 0 8px 8px 0;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .warn { color: var(--danger); font-weight: 600; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+    }
+    tr:last-child td { border-bottom: 0; }
+    th { color: var(--muted); font-weight: 650; }
+    @media (max-width: 720px) {
+      .page { padding: 30px 18px 52px; }
+      h1 { font-size: 28px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="hero">
+    <span class="tag">PRD</span><span class="tag">macOS</span><span class="tag">Swift + AppKit</span>
+    <h1>OpenPathTrace 最小 PRD 与实现计划</h1>
+    <p class="lead">目标是复刻 PathTrace 的核心价值，但只做一个可审计、自用、无网络、最小闭环的 macOS 文件弹窗助手。</p>
+  </div>
+
+  <div class="section">
+    <h2>1. 结论</h2>
+    <p>第一版只做一件事：标准 macOS 文件弹窗出现时，在弹窗旁显示常用目录、最近跳转目录和 Finder 当前窗口目录，点击后让弹窗跳转到对应目录。</p>
+    <p>不做全量 PathTrace。拖拽暂存、统计、菜单栏收藏面板、第三方文件管理器、复杂分组、自动选择文件全部后置。</p>
+  </div>
+
+  <div class="section">
+    <h2>2. 目标与非目标</h2>
+    <div class="grid">
+      <div class="box">
+        <h3>目标</h3>
+        <ul>
+          <li>菜单栏常驻。</li>
+          <li>监听标准 <code>NSOpenPanel</code> / <code>NSSavePanel</code>。</li>
+          <li>弹窗出现后显示非抢焦点贴边面板。</li>
+          <li>列表包含收藏、最近、Finder 三组路径。</li>
+          <li>点击路径后只跳转目录，不自动选择文件。</li>
+          <li>本进程收到 AX 事件后，显示面板耗时小于 50ms。</li>
+          <li>配置本地 JSON 保存，可人工审计。</li>
+          <li>支持登录启动开关。</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>非目标</h3>
+        <ul>
+          <li>不做 App Store、签名、公证、DMG。</li>
+          <li>不启用 App Sandbox。</li>
+          <li>不做自动更新。</li>
+          <li>不加第三方依赖。</li>
+          <li>不联网。</li>
+          <li>不扫描全盘路径。</li>
+          <li>不支持 Electron 或自绘文件弹窗的承诺。</li>
+          <li>不承诺系统事件到达本进程之前的延迟。</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>3. 代码位置</h2>
+    <ul>
+      <li>原型代码放在 <code>/Users/repairman/Documents/Codex/2026-07-02/new-chat/work/open-pathtrace-prototype</code>。</li>
+      <li>正式仓库放在 <code>/Users/repairman/opt/OpenPathTrace</code>。</li>
+      <li>正式仓库创建并迁移必要代码后，删除原型代码和目录。</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>4. 用户流程</h2>
+    <ol>
+      <li>用户启动 OpenPathTrace，菜单栏出现状态图标。</li>
+      <li>首次运行时检查辅助功能权限；缺失则引导打开系统设置。</li>
+      <li>用户在任意 App 中打开标准“打开”或“保存”弹窗。</li>
+      <li>工具通过 Accessibility 事件识别当前文件弹窗。</li>
+      <li>工具在弹窗右侧显示非抢焦点 <code>NSPanel</code>；右侧空间不足则贴左侧。</li>
+      <li>用户点击某个目录。</li>
+      <li>工具对文件弹窗发送 <code>Cmd+Shift+G</code>，输入路径并回车。</li>
+      <li>跳转成功后，该目录进入最近列表。</li>
+      <li>文件弹窗关闭后，贴边面板隐藏。</li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <h2>5. 权限与安全边界</h2>
+    <table>
+      <thead>
+        <tr><th>项目</th><th>决定</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>辅助功能权限</td><td>必须申请，用于监听和操作文件弹窗。</td></tr>
+        <tr><td>Finder 自动化权限</td><td>首次读取 Finder 当前窗口路径时由系统弹窗授权；失败则隐藏 Finder 分组。</td></tr>
+        <tr><td>网络</td><td>不写任何网络请求代码。</td></tr>
+        <tr><td>存储</td><td>只写本地 JSON，路径可见、可删、可备份。</td></tr>
+        <tr><td>文件内容</td><td>不读取文件内容，只保存目录路径字符串。</td></tr>
+        <tr><td>Sandbox</td><td>不开启，避免阻碍 Accessibility 与自动化。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>6. 数据结构</h2>
+    <p>配置文件位置：<code>~/Library/Application Support/OpenPathTrace/config.json</code></p>
+    <pre><code>{
+  "favorites": [
+    "/Users/repairman/Downloads",
+    "/Users/repairman/Documents"
+  ],
+  "recent": [
+    "/Users/repairman/code"
+  ],
+  "launchAtLogin": true
+}</code></pre>
+    <ul>
+      <li><code>favorites</code>：手动收藏目录。</li>
+      <li><code>recent</code>：本工具成功跳转过的目录，最多 50 条，去重，最新在前。</li>
+      <li><code>launchAtLogin</code>：登录启动开关状态。</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>7. 模块设计</h2>
+    <table>
+      <thead>
+        <tr><th>模块</th><th>职责</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>AppDelegate</code></td><td>启动应用、初始化菜单栏、权限检查、组件装配。</td></tr>
+        <tr><td><code>StatusMenuController</code></td><td>菜单栏状态、退出、打开配置文件、登录启动开关。</td></tr>
+        <tr><td><code>AccessibilityMonitor</code></td><td>监听当前 App 的窗口创建和焦点窗口变化，识别标准文件弹窗。</td></tr>
+        <tr><td><code>FileDialogDetector</code></td><td>判断 AX 窗口是否像标准文件弹窗，返回窗口 frame 和目标引用。</td></tr>
+        <tr><td><code>OverlayPanelController</code></td><td>创建非抢焦点 <code>NSPanel</code>，计算贴边位置，渲染路径列表。</td></tr>
+        <tr><td><code>PathStore</code></td><td>读写 JSON，维护收藏和最近路径。</td></tr>
+        <tr><td><code>FinderPathProvider</code></td><td>通过 AppleScript 只读获取 Finder 当前窗口目录。</td></tr>
+        <tr><td><code>DialogNavigator</code></td><td>点击路径后发送 <code>Cmd+Shift+G</code>、路径、回车。</td></tr>
+        <tr><td><code>LaunchAtLoginController</code></td><td>封装 <code>SMAppService.mainApp.register()</code> 和 <code>unregister()</code>。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>8. UI 规则</h2>
+    <ul>
+      <li>面板默认贴文件弹窗右侧；右侧不够贴左侧；左右都不够则覆盖在右上角。</li>
+      <li>面板不抢焦点。</li>
+      <li>分组只显示“收藏”“最近”“Finder”。</li>
+      <li>每项显示文件夹名；完整路径放 tooltip。</li>
+      <li>顶部搜索框只过滤当前已加载列表，大小写不敏感。</li>
+      <li>右键菜单只支持收藏和移除收藏。</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>9. 实现步骤</h2>
+    <ol>
+      <li>先在 <code>work/open-pathtrace-prototype</code> 创建 SwiftPM macOS 原型，验证 AX 识别、贴边面板和目录跳转。</li>
+      <li>原型验证通过后，在 <code>/Users/repairman/opt/OpenPathTrace</code> 创建正式仓库。</li>
+      <li>迁移必要代码后删除原型代码和目录。</li>
+      <li>创建正式 SwiftPM macOS 可执行 App 骨架，接入 AppKit 生命周期和菜单栏。</li>
+      <li>实现 <code>PathStore</code>，完成 JSON 读写、去重、最近路径上限 50。</li>
+      <li>实现辅助功能权限检查和系统设置跳转。</li>
+      <li>实现 <code>AccessibilityMonitor</code>，监听当前前台 App 的窗口变化。</li>
+      <li>实现最小 <code>FileDialogDetector</code>，只识别标准文件弹窗。</li>
+      <li>实现 <code>OverlayPanelController</code> 和列表 UI。</li>
+      <li>实现 <code>DialogNavigator</code>，用 <code>Cmd+Shift+G</code> 跳转目录。</li>
+      <li>接入 Finder 当前窗口路径读取，失败时静默降级。</li>
+      <li>接入登录启动开关，使用 <code>SMAppService</code>。</li>
+      <li>加关键日志：AX 事件时间、识别结果、面板显示耗时、跳转结果、JSON 读写失败。</li>
+    </ol>
+  </div>
+
+  <div class="section">
+    <h2>10. 验证清单</h2>
+    <ul>
+      <li>启动后菜单栏常驻。</li>
+      <li>未授权辅助功能时能明确提示并打开系统设置。</li>
+      <li>标准打开弹窗出现时，面板自动出现。</li>
+      <li>标准保存弹窗出现时，面板自动出现。</li>
+      <li>点击收藏目录后，文件弹窗跳到该目录。</li>
+      <li>成功跳转目录后，最近列表更新并持久化。</li>
+      <li>Finder 有窗口时显示 Finder 当前目录。</li>
+      <li>Finder 权限失败时，核心功能不受影响。</li>
+      <li>关闭文件弹窗后，面板隐藏。</li>
+      <li>退出重启后配置仍存在。</li>
+      <li>登录启动开关能注册和取消。</li>
+      <li>日志证明：收到 AX 事件到面板显示完成小于 50ms。</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>11. 风险</h2>
+    <ul>
+      <li><span class="warn">文件弹窗识别可能不稳定。</span> 先只支持标准弹窗，遇到常用 App 再加针对性规则。</li>
+      <li><span class="warn">系统事件到达时间不可控。</span> 只承诺本进程处理耗时，不承诺系统全链路小于 50ms。</li>
+      <li><span class="warn">AppleScript Finder 权限可能被拒绝。</span> Finder 分组降级隐藏，不影响收藏和最近路径。</li>
+      <li><span class="warn">Cmd+Shift+G 依赖系统行为。</span> 这是第一版最稳、代码最少的跳转方式；后续有必要再研究 AX 直接设置路径。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>
